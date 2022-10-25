@@ -13,59 +13,6 @@
 using namespace std;
 namespace fs = std::filesystem;
 
-/// @brief Read in the given filepath to an initialization file
-///        and store the data in the passed in map.
-/// @param filePath path to .ini file
-/// @param vars <string, double> map to hold variable names and values in pair
-void read(char* filePath, map<string, double> & vars) {
-    map<string, bool> var_check = {
-        {"vt", false},
-        {"width", false},
-        {"pulse_delta", false},
-        {"drop_ratio", false},
-        {"below_drop_ratio", false}
-    };
-    fstream arg_file(filePath);
-    string label;
-    double val = 0.00;
-    char temp;
-
-    while (arg_file >> temp) {
-        if (temp == '=') { // read continuously until =
-            // invalid label
-            if (vars.count(label) == 0) {
-                cout << "Invalid or duplicate INI key: " << label << endl;
-                exit(1);
-            }
-            
-            arg_file >> val;
-            // bad numeric value 
-            if (arg_file.fail()) {
-                cout << "Invalid value for " << label << " in " << filePath << endl;
-                exit(1);
-            }
-
-            // label and value are valid, add to map and zero vars
-            vars[label] = val;
-            var_check[label] = true;
-            label = "";
-            temp = 0;
-        }
-        else {
-            label += temp; // haven't hit =, add char to label string
-        }
-    }
-
-    // verify we got all the keys
-    for (auto e : var_check) {
-        if (e.second == false) {
-            cout << "Invalid INI file: missing one or more keys" << endl;
-            exit(0);
-        }
-    }
-    // end of read() function
-}
-
 int main(int argc, char** argv)
 {
     if (argc <= 1) {
@@ -73,28 +20,51 @@ int main(int argc, char** argv)
         std::exit(1);
     }
 
-    map<string, double> variables = {
-        {"vt", 0}, // voltage threshold, is Vi+2 - Vi > VT, it's a pulse
-        {"width", 0},
-        {"pulse_delta", 0},
-        {"drop_ratio", 0.00}, // 
-        {"below_drop_ratio", 0} // number of values less than drop ratio
+    fstream iniStream(argv[1]);
+
+    string val;
+    string key;
+
+    map<string, float> vars = {
+        {"vt", -1},
+        {"width", -1},
+        {"pulse_delta", -1},
+        {"drop_ratio", -1},
+        {"below_drop_ratio", -1}
     };
 
-    read(argv[1], variables); // initialize the above map or exit on error in read()
+    while (getline(iniStream, key, '=') && getline(iniStream, val)) {
+        if (vars.count(key) == 0) { // if the key isn't in the map
+            cout << "Invalid or duplicate INI key: " << key << endl;
+            exit(1);
+        }
+        try {
+            vars[key] = stof(val); // use a float conversion for all, ints become ints later
+        } catch (exception e) { // if the conversion fails
+            cout << "Invalid value for " << key << " in " << argv[1] << endl;
+            exit(1);
+        }
+    }
+    // verify that each of the variables was initialized
+    // based on the program I'm assuming -1 is a no-go for any of them
+    for (auto pair : vars) {
+        if (pair.second == -1) {
+            cout << "Invalid INI file: missing one or more keys" << endl;
+            exit(1);
+        }
+    }
 
-    int vt = variables["vt"];
-    int width = variables["width"];
-    int pulse_delta = variables["pulse_delta"];
-    float drop_ratio = variables["drop_ratio"];
-    int below_drop_ratio = variables["below_drop_ratio"];
+    // pull the values out of the map for better readability below
+    int vt = vars["vt"];
+    int width = vars["width"];
+    int pulse_delta = vars["pulse_delta"];
+    float drop_ratio = vars["drop_ratio"];
+    int below_drop_ratio = vars["below_drop_ratio"];
 
-    string path(".\\"); // current working directory
     string ext(".dat"); // .dat file extensions
-
-    vector<fs::directory_entry> files; // vector of the file path pointers
+    vector<fs::directory_entry> files; // vector of the .dat file path pointers
     // store the .dat file paths so I don't have to indent the entire program within a loop
-    for (auto &p : fs::recursive_directory_iterator(path)) {
+    for (auto &p : fs::recursive_directory_iterator( fs::current_path() )) {
         if (p.path().extension() == ext) { files.push_back(p); }
     }
 
@@ -109,19 +79,13 @@ int main(int argc, char** argv)
             raw_data.push_back(-num); // invert and push
         }
 
-        //
-        // Get the smooth data
-        //
-
-        // get the first 3
+        // copy the first 3, get the smooth data, copy the last 3
         copy(raw_data.begin(), raw_data.begin() + 3, back_inserter(smooth_data));
-
         int smooth;
         for (size_t i = 3; i < raw_data.size() - 3; i++) {
             smooth = (raw_data[i-3] + 2*(raw_data[i-2]) + 3*(raw_data[i-1]) + 3*(raw_data[i]) + 3*(raw_data[i+1]) + 2*(raw_data[i+2]) + raw_data[i+3]) / 15;
             smooth_data.push_back(smooth);
         }
-        // get the last 3
         copy(raw_data.end() - 3, raw_data.end(), back_inserter(smooth_data));
 
         vector<int> pulses;
@@ -135,34 +99,27 @@ int main(int argc, char** argv)
             }
         }
 
-
-        vector<int> piggyback;
-        for (size_t i = 0; i < pulses.size() - 1; i++) {
-            if (pulses[i+1] - pulses[i] <= pulse_delta) {
-
-                // look for piggybacks
-                vector<int> sub_pulse; // smooth data between pulse[i] and pulse[i+1]
-                copy(smooth_data.begin() + pulses[i], smooth_data.begin() + pulses[i+1], back_inserter(sub_pulse));
-
-                int peak = *max_element(sub_pulse.begin(), sub_pulse.end()); // get the peak of the subpulse
-                int below_drop_count = 0;
-                auto start_at_peak = find(sub_pulse.begin(), sub_pulse.end(), peak); // iterator for subpulse starting at the peak
-                for (auto start = start_at_peak; start != sub_pulse.end(); start++) {
-                    if ( *start < (drop_ratio * peak) ) { below_drop_count++; }
-                }
-
-                // if it's a piggyback add it to the delete list
-                if (below_drop_count > below_drop_ratio) {
-                    piggyback.push_back(i);
-                }
-            }
-
-        }
-
         // if the file has no pulses, say it's invalid, else print name and then data
         if (pulses.size() == 0) {
             cout <<"Invalid file: " << p.path().filename().string() << endl;
-            break;
+            cout << endl;
+            continue; // out of main loop
+        }
+
+        vector<int> piggyback; // hold verified piggybacks (indexes of the pulses to delete)
+        for (size_t i = 0; i < pulses.size() - 1; i++) {
+            auto first = pulses[i];
+            auto next = pulses[i+1];
+            if (next - first <= pulse_delta) { // distance betweeen two indexes <+ pulse_delta
+                int peak = *max_element(smooth_data.begin() + first, smooth_data.begin() + next); // get the peak of the subpulse
+                int drop_count = 0;
+
+                auto start_at_peak = find(smooth_data.begin() + first, smooth_data.begin() + next, peak); // iterator for subpulse starting at the peak
+                for (auto start = start_at_peak; start != smooth_data.begin() + next; start++) {
+                    if ( *start < (drop_ratio * peak) ) { drop_count++; }
+                }
+                if (drop_count > below_drop_ratio) { piggyback.push_back(i); }
+            }
         }
 
         // output the file name
@@ -172,43 +129,21 @@ int main(int argc, char** argv)
 
         // go in reverse through piggybacks and delete from pulses
         auto rbeg = piggyback.rbegin();
-        while (rbeg != piggyback.rend()) {
-            pulses.erase(pulses.begin() + *rbeg); // erase piggyback from pulses
-            rbeg++; // increment the iter
-        }
+        while (rbeg != piggyback.rend()) { pulses.erase(pulses.begin() + *rbeg++); }
 
         /// calculate area below here
-
-        auto start = pulses.begin();
-        auto end = pulses.end();
-        int area;
-        while (true) {
-            auto next = start + 1;
-            area = 0;
-
-            if (next != end) {
-                if (*next - *start <= width) { // pulses -> start of next pulse, not (width)
-                    area = accumulate(raw_data.begin() + *start, raw_data.begin() + *(start + 1), 0);
-                }
+        int end; // actual end index
+        for (auto i = 0; i < pulses.size(); i++) {
+            if (i == pulses.size() - 1) { // last pulse - either to i+(width) sample or end of raw_data
+                end = pulses[i] + width < raw_data.size() ? pulses[i] + width : raw_data.size();
             }
-            else { // last pulse index in the list
-                if (*start + width >= (int)raw_data.size()) { // hits end before (width)
-                    area = accumulate(raw_data.begin() + *start, raw_data.end(), 0);
-                }
+            else { // not last, either to i+(width) sample or next pulse, whichever is first
+                end = pulses[i+1] - pulses[i] < width ? pulses[i+1] : pulses[i] + width;
             }
-
-            if (!area) { // full (width) area
-                area = accumulate(raw_data.begin() + *start, raw_data.begin() + *start + width, 0);
-            }
-            
-            // output
-            cout << *start << " (" << area << ")" << endl;
-
-            if (++start == end) {
-                cout << endl;
-                break;
-            }
-        }        
+            int area = accumulate(raw_data.begin() + pulses[i], raw_data.begin() + end, 0);
+            cout << pulses[i] << " (" << area << ")" << endl; // output
+        }
+        cout << endl;   
         // end of file loop
     }
     std::exit(0);
